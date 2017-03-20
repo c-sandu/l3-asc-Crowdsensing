@@ -7,6 +7,9 @@ March 2016
 """
 
 from threading import Event, Thread
+from Queue import Queue
+
+from utils import ReusableBarrierCond
 
 
 class Device(object):
@@ -36,6 +39,15 @@ class Device(object):
         self.thread = DeviceThread(self)
         self.thread.start()
 
+        self.timepoint_barrier = None;
+        if device_id == 0:
+            self.timepoint_barrier = ReusableBarrierCond(1)
+        self.script_queue = Queue()
+        self.workers = [ DeviceWorker(self) for i in range(8) ]
+        for i in range(8):
+            self.workers[i].start()
+        print "Device %d finished __init__" % device_id
+
     def __str__(self):
         """
         Pretty prints this device.
@@ -52,8 +64,17 @@ class Device(object):
         @type devices: List of Device
         @param devices: list containing all devices
         """
-        # we don't need no stinkin' setup
-        pass
+        #print devices[0].timepoint_barrier
+        if self.device_id == 0:
+            self.timepoint_barrier.resize(len (devices))
+        else:
+            for device in devices:
+                if device.device_id == 0:
+                    self.timepoint_barrier = device.timepoint_barrier
+                    break
+
+        print "Device %d finished setup" % self.device_id
+
 
     def assign_script(self, script, location):
         """
@@ -68,9 +89,9 @@ class Device(object):
         """
         if script is not None:
             self.scripts.append((script, location))
-            self.script_received.set()
-        else:
-            self.timepoint_done.set()
+            #self.script_received.set()
+        #else:
+        #    self.timepoint_done.set()
 
     def get_data(self, location):
         """
@@ -123,36 +144,59 @@ class DeviceThread(Thread):
 
     def run(self):
         # hope there is only one timepoint, as multiple iterations of the loop are not supported
+
         while True:
             # get the current neighbourhood
             neighbours = self.device.supervisor.get_neighbours()
             if neighbours is None:
+                print "something happened with %d" % self.device.device_id
                 break
 
-            self.device.script_received.wait()
 
-            # run scripts received until now
             for (script, location) in self.device.scripts:
-                script_data = []
-                # collect data from current neighbours
-                for device in neighbours:
-                    data = device.get_data(location)
-                    if data is not None:
-                        script_data.append(data)
-                # add our data, if any
-                data = self.device.get_data(location)
+                self.device.script_queue.put((script, location, neighbours), block=True)
+
+            self.device.script_queue.join()
+
+            self.device.timepoint_barrier.wait()
+            #self.device.timepoint_done.wait()
+
+
+class DeviceWorker(Thread):
+    """
+    Worker class for running scripts on a device
+    """
+
+    def __init__(self, device):
+        Thread.__init__(self, name="Device Worker for Device %d" % device.device_id)
+        self.device = device
+
+
+    def run(self):
+
+        while True:
+            script_queue = self.device.script_queue
+            
+            (script, location, neighbours) = script_queue.get(block=True)
+            script_data = []
+            # collect data from current neighbours
+            for device in neighbours:
+                data = device.get_data(location)
                 if data is not None:
                     script_data.append(data)
+            # add our data, if any
+            data = self.device.get_data(location)
+            if data is not None:
+                script_data.append(data)
 
-                if script_data != []:
-                    # run script on data
-                    result = script.run(script_data)
+            if script_data != []:
+                # run script on data
+                result = script.run(script_data)
 
-                    # update data of neighbours, hope no one is updating at the same time
-                    for device in neighbours:
-                        device.set_data(location, result)
-                    # update our data, hope no one is updating at the same time
-                    self.device.set_data(location, result)
+                # update data of neighbours, hope no one is updating at the same time
+                for device in neighbours:
+                    device.set_data(location, result)
+                # update our data, hope no one is updating at the same time
+                self.device.set_data(location, result)
 
-            # hope we don't get more than one script
-            self.device.timepoint_done.wait()
+            script_queue.task_done()
