@@ -139,6 +139,8 @@ class Device(object):
         self.thread.join()
 
 
+
+
 class DeviceThread(Thread):
     """
     Class that implements the device's worker thread.
@@ -161,35 +163,34 @@ class DeviceThread(Thread):
             # get the current neighbourhood
             neighbours = self.device.supervisor.get_neighbours()
             if neighbours is None:
+                # print "Device %d" % self.device.device_id
                 # print "something happened with %d" % self.device.device_id
                 break
 
             self.device.scripts_mutex.acquire()
+            for worker in self.device.workers:
+                worker.neighbours = neighbours
+
             for (script, location) in self.device.scripts:
                 self.device.script_queue.put((script, location))
             self.device.scripts_mutex.release()
 
-            for worker in self.device.workers:
-                worker.neighbours = neighbours
-                worker.timepoint_done.clear()
-                worker.ready_to_start.set()
 
 
             self.device.timepoint_done.wait()
-            self.device.script_queue.join()
-            self.device.timepoint_done.clear()
 
-            for worker in self.device.workers:
-                worker.ready_to_start.clear()
-                worker.timepoint_done.set()
+            self.device.script_queue.join()
+
+            self.device.timepoint_done.clear()
 
             self.device.timepoint_barrier.wait()
 
-        self.device.shutdown_initiated.set()
         for worker in self.device.workers:
-            worker.ready_to_start.set()
-            worker.timepoint_done.set()
+            self.device.script_queue.put((None, None))
+
+        for worker in self.device.workers:
             worker.join()
+
 
 
 class DeviceWorker(Thread):
@@ -200,42 +201,36 @@ class DeviceWorker(Thread):
     def __init__(self, device):
         Thread.__init__(self, name="Device Worker for Device %d" % device.device_id)
         self.device = device
-        self.ready_to_start = Event()
         self.neighbours = []
-        self.script_queue = device.script_queue
-        self.timepoint_done = Event()
 
 
     def run(self):
 
         while True:
-            self.ready_to_start.wait()
+            (script, location) = self.device.script_queue.get(block=True)
+            # print "Device %d got sth from queue" % self.device.device_id
 
-            if self.device.shutdown_initiated.is_set():
+            if script is None and location is None:
+                self.device.script_queue.task_done()
                 break
 
-            while not (self.timepoint_done.is_set() and self.script_queue.empty()):
-                try:
-                    (script, location) = self.script_queue.get(block=False)
-                    script_data = []
+            script_data = []
 
-                    for device in self.neighbours:
-                        data = device.get_data(location)
-                        if data is not None:
-                            script_data.append(data)
+            for device in self.neighbours:
+                data = device.get_data(location)
+                if data is not None:
+                    script_data.append(data)
 
-                    data = self.device.get_data(location)
-                    if data is not None:
-                        script_data.append(data)
+            data = self.device.get_data(location)
+            if data is not None:
+                script_data.append(data)
 
-                    if script_data != []:
-                        result = script.run(script_data)
+            if script_data != []:
+                result = script.run(script_data)
 
-                        for device in self.neighbours:
-                            device.set_data(location, result)
+                for device in self.neighbours:
+                    device.set_data(location, result)
 
-                        self.device.set_data(location, result)
+                self.device.set_data(location, result)
 
-                    self.script_queue.task_done()
-                except Empty:
-                    continue
+            self.device.script_queue.task_done()
