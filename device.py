@@ -97,9 +97,8 @@ class Device(object):
             self.scripts.append((script, location))
             self.scripts_mutex.release()
             self.script_queue.put((script, location))
-            #self.script_received.set()
-        #else:
-        #    self.timepoint_done.set()
+        else:
+            self.timepoint_done.set()
 
     def get_data(self, location):
         """
@@ -175,7 +174,10 @@ class DeviceThread(Thread):
                 worker.timepoint_done.clear()
                 worker.ready_to_start.set()
 
+
+            self.device.timepoint_done.wait()
             self.device.script_queue.join()
+            self.device.timepoint_done.clear()
 
             for worker in self.device.workers:
                 worker.ready_to_start.clear()
