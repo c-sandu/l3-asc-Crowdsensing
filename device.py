@@ -6,7 +6,7 @@ Assignment 1
 March 2016
 """
 
-from threading import Event, Thread, Semaphore
+from threading import Event, Thread, Semaphore, Lock
 from Queue import Queue, Empty
 
 from utils import ReusableBarrierCond
@@ -41,6 +41,10 @@ class Device(object):
         self.thread = DeviceThread(self)
         self.tp_barrier_ready = Event()
         self.shutdown_initiated = Event()
+        self.wait_for_scripts = Event()
+
+        self.location_mutexes_mutex = None
+        self.location_mutexes = {}
 
         self.timepoint_barrier = None;
         self.script_queue = Queue()
@@ -67,18 +71,24 @@ class Device(object):
 
         if self.device_id == 0:
             self.timepoint_barrier = ReusableBarrierCond(len (devices))
+            self.location_mutexes_mutex = Lock()
             self.tp_barrier_ready.set()
         else:
             for device in devices:
                 if device.device_id == 0:
                     device.tp_barrier_ready.wait()
                     self.timepoint_barrier = device.timepoint_barrier
+                    self.location_mutexes = device.location_mutexes
+                    self.location_mutexes_mutex = device.location_mutexes_mutex
 
         self.thread.start()
         for worker in self.workers:
             worker.start()
 
-        # print "Device %d finished setup" % self.device_id
+        with self.location_mutexes_mutex:
+            for location in self.sensor_data.keys():
+                self.location_mutexes[location] = Lock()
+
 
 
     def assign_script(self, script, location):
@@ -92,12 +102,14 @@ class Device(object):
         @type location: Integer
         @param location: the location for which the script is interested in
         """
+        self.wait_for_scripts.wait()
         if script is not None:
             self.scripts_mutex.acquire()
             self.scripts.append((script, location))
-            self.scripts_mutex.release()
             self.script_queue.put((script, location))
+            self.scripts_mutex.release()
         else:
+            self.wait_for_scripts.clear()
             self.timepoint_done.set()
 
     def get_data(self, location):
@@ -175,7 +187,7 @@ class DeviceThread(Thread):
                 self.device.script_queue.put((script, location))
             self.device.scripts_mutex.release()
 
-
+            self.device.wait_for_scripts.set()
 
             self.device.timepoint_done.wait()
 
@@ -214,6 +226,8 @@ class DeviceWorker(Thread):
                 self.device.script_queue.task_done()
                 break
 
+            # print "Device %d blocking on: %d %s" % (self.device.device_id, location, script)
+            self.device.location_mutexes[location].acquire()
             script_data = []
 
             for device in self.neighbours:
@@ -233,4 +247,6 @@ class DeviceWorker(Thread):
 
                 self.device.set_data(location, result)
 
+            self.device.location_mutexes[location].release()
             self.device.script_queue.task_done()
+            # print "Device %d unblocking on: %d" % (self.device.device_id, location)

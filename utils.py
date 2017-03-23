@@ -17,9 +17,3 @@ class ReusableBarrierCond():
         else:
             self.cond.wait();
         self.cond.release();
-
-    def resize(self, num_threads):
-        self.cond.acquire()
-        self.num_threads = num_threads
-        self.count_threads = self.num_threads
-        self.cond.release()
