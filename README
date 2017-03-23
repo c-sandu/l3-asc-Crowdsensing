@@ -1,0 +1,67 @@
+Computer Systems Architecture
+Assignment 1 - Crowdsensing
+March 2017
+
+Student: Cristian-Andrei Sandu
+Group: 333CC
+
+
+device.py:
+    - my solution uses 8 worker threads per device, which are the ones running
+    the scripts submitted to the device
+
+    - each location has a Lock object assigned to it(each device has the same
+    Locks for each location), to ensure atomicity of the get_data, script.run
+    and set_data operations
+
+    - each worker gets their script from a device-specific work_queue, a Queue
+    type object(which is also thread-safe out of the box), acquire the lock on
+    the location required by the script, gets the old data from neighbours, runs
+    the script and sets the new data for each neighbour(and itself)
+
+    - a timepoint consists of these operations, in this order:
+        - get list of neighbours (and test for termination condition)
+        - add previously received scripts to the device work_queue (this will
+        unlock the workers stuck on work_queue.get())
+        - notifies the thread invoking assign_script() that the neighbours are
+        set and allow incoming scripts to be added to the device list of scripts
+        and work_queue
+        - the DeviceThread will block until the timepoint_done Event is set(the
+        last script for this timepoint was received - signalled by receiving
+        a None script) in the assign_script() method
+        - the DeviceThread awaits execution of all scripts in the work_queue and
+        clears the timepoint_done Event for the next timepoint
+        - the DeviceThread object will wait at the timepoint_barrier for all the
+        other devices and begins the new timepoint
+
+    - when shutdown is initiated, 8(one for each worker) (None, None) tuples are
+    placed in the work_queue, which signal the workers to break out of their
+    main loop; join() is called for each thread assigned to the device
+
+    - the sharing of "class variables" is done this way:
+        - each device other than Device0 will wait on an Event that signals
+        initialization of Device0's timepoint_barrier, location_locks dictionary
+        and location_locks_mutex
+        - each device other than Device0 will set its own instance of
+        timepoint_barrier, location_locks dictionary and location_locks_mutex to
+        be the ones of Device0
+        - setup of the location locks is done by each device initializing the
+        lock for any location that doesn't have it yet; (no other location that
+        is outside the union of initial sensor_data can exist)
+
+
+barrier.py:
+    - implementation of a reusable barrier using a Condition object, taken from
+    the lab3 documentation
+
+
+general:
+    - although simple operations on lists and dictionaries(as built-in Python
+    types) should be thread-safe, I've included locks to ensure that reading
+    and setting a value is done by a single thread at a time(not that big of an
+    overhead, anyway)
+    - pylint 1.6.4(1.6.5 was not available on my Linux distro) signaled the
+    following error when using a Lock for scripts_mutex: "E:113,17: Context
+    manager 'lock' doesn't implement __enter__ and __exit__.
+    (not-context-manager)", have no idea why, so I used a semaphore(no error)
+    for this mutex only
